@@ -1,97 +1,19 @@
-// import 'package:flutter/material.dart';
-// import 'package:web3modal_flutter/web3modal_flutter.dart';
-
-// class HomePage extends StatefulWidget {
-//   const HomePage({super.key});
-
-//   @override
-//   State<HomePage> createState() => _HomePageState();
-// }
-
-// class _HomePageState extends State<HomePage> {
-//   late W3MService _w3mService;
-//   @override
-//   void initState() {
-//     super.initState();
-//     initializedState();
-//   }
-
-//   void initializedState() async {
-//     W3MChainPresets.chains.putIfAbsent(_chainId, () => _sepoliaChain);
-//     _w3mService = W3MService(
-//       projectId: '28f8679078313fbf8bd20452df74df4e',
-//       metadata: const PairingMetadata(
-//         name: 'Web3Modal Flutter Example',
-//         description: 'Web3Modal Flutter Example',
-//         url: 'https://www.walletconnect.com/',
-//         icons: ['https://walletconnect.com/walletconnect-logo.png'],
-//         redirect: Redirect(
-//           native: 'flutterdapp://',
-//           universal: 'https://www.walletconnect.com',
-//         ),
-//       ),
-//     );
-//     await _w3mService.init();
-//   }
-
-//   void _onPersonalSign() async {
-//     await _w3mService.launchConnectedWallet();
-//     await _w3mService.request(
-//       topic: _w3mService.session?.topic ?? '',
-//       chainId: 'eip155:$_chainId', // Connected chain id
-//       request: SessionRequestParams(
-//         method: 'personal_sign',
-//         params: ['Sign in', _w3mService.session!.address!],
-//       ),
-//     );
-//   }
-
-//   @override
-//   Widget build(BuildContext context) {
-//     return Column(
-//       mainAxisAlignment: MainAxisAlignment.center,
-//       children: [
-//         W3MConnectWalletButton(service: _w3mService),
-//         const SizedBox(
-//           height: 16,
-//         ),
-//         W3MNetworkSelectButton(service: _w3mService),
-//         const SizedBox(
-//           height: 16,
-//         ),
-//         W3MAccountButton(service: _w3mService),
-//         const SizedBox(
-//           height: 16,
-//         ),
-//         ElevatedButton(
-//             onPressed: _onPersonalSign, child: const Text("Personal Sign"))
-//       ],
-//     );
-//   }
-// }
-
-// const _chainId = "11155111";
-
-// final _sepoliaChain = W3MChainInfo(
-//   chainName: 'Sepolia',
-//   namespace: 'eip155:$_chainId',
-//   chainId: _chainId,
-//   tokenName: 'ETH',
-//   rpcUrl: 'https://rpc.sepolia.org/',
-//   blockExplorer: W3MBlockExplorer(
-//     name: 'Sepolia Explorer',
-//     url: 'https://sepolia.etherscan.io/',
-//   ),
-// );
-
-import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
-import 'package:web3dart/web3dart.dart';
+import 'package:get/get.dart';
+import 'package:get/get_core/src/get_main.dart';
+import 'package:web3_modal_integration/apis/graphql_mutation_api.dart';
+import 'package:web3_modal_integration/apis/graphql_reponse.dart';
+import 'package:web3_modal_integration/apis/graphql_request.dart';
+import 'package:web3_modal_integration/graphql_queries_api.dart';
+import 'package:web3_modal_integration/shared_preference/shared_preference_db.dart';
 import 'package:web3modal_flutter/web3modal_flutter.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  const HomePage({Key? key}) : super(key: key);
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -107,20 +29,28 @@ class _HomePageState extends State<HomePage> {
   }
 
   void _onPersonalSign() async {
-    await _w3mService.launchConnectedWallet();
-    var hash = await _w3mService.web3App?.request(
-      topic: _w3mService.session!.topic ?? "",
-      chainId: 'eip155:1',
-      request: SessionRequestParams(
-        method: 'personal_sign',
-        params: ['GM from W3M flutter!!', _w3mService.session!.address],
-      ),
-    );
-    debugPrint(hash);
+    try {
+      await _w3mService.launchConnectedWallet();
+      var hash = await _w3mService.web3App?.request(
+        topic: _w3mService.session!.topic ?? "",
+        chainId: 'eip155:1',
+        request: SessionRequestParams(
+          method: 'personal_sign',
+          params: ['GM from W3M flutter!!', _w3mService.session!.address],
+        ),
+      );
+
+      // After successfully signing, retrieve challenge ids
+      await _getChallengeIds();
+
+      // After retrieving challenge ids, generate access token
+      await _generateAccessToken();
+    } catch (e) {
+      print("Error: $e");
+    }
   }
 
   void _initializeService() async {
-    W3MChainPresets.chains.putIfAbsent('11155111', () => _sepoliaChain);
     _w3mService = W3MService(
       projectId: "28f8679078313fbf8bd20452df74df4e",
       logLevel: LogLevel.error,
@@ -138,9 +68,61 @@ class _HomePageState extends State<HomePage> {
     await _w3mService.init();
   }
 
-  @override
-  void dispose() {
-    super.dispose();
+  Future<void> _getChallengeIds() async {
+    try {
+      GraphQlResponse getLensData =
+          await GraphqlRequest.get(GraphqlQueriesApi.getLensId, {
+        "request": {
+          "where": {"ownedBy": PrefsDb.getWalletId}
+        }
+      });
+
+      if (getLensData.isSuccess &&
+          getLensData.data['profiles']['items'].isNotEmpty) {
+        PrefsDb.saveProfileId(getLensData.data['profiles']['items'][0]['id']);
+      }
+
+      GraphQlResponse challengeResponse =
+          await GraphqlRequest.get(GraphqlQueriesApi.getChallengeId, {
+        "request": {
+          "for": PrefsDb.getProfileId,
+          "signedBy": PrefsDb.getWalletId
+        }
+      });
+
+      if (challengeResponse.isSuccess) {
+        var id = challengeResponse.data['challenge']['id'];
+        var msg = challengeResponse.data['challenge']['text'];
+        PrefsDb.saveSignedMsg(msg);
+        PrefsDb.saveSignedId(id);
+      }
+    } catch (e) {
+      print(e.toString());
+    }
+  }
+
+  Future<void> _generateAccessToken() async {
+    try {
+      // log(PrefsDb.getSignatureId!);
+      GraphQlResponse accessTokenRes =
+          await GraphqlRequest.save(GraphqlMutationsApi.getAccessToken, {
+        "request": {
+          "id": PrefsDb.getSignedId,
+          "signature": PrefsDb.getSignatureId!
+              .substring(1, PrefsDb.getSignatureId!.length - 1)
+        }
+      });
+
+      if (accessTokenRes.isSuccess) {
+        var accessToken = accessTokenRes.data['authenticate']['accessToken'];
+        PrefsDb.saveToken(accessToken);
+      } else {
+        // Get.offAll(() => MyHomePage());
+      }
+    } catch (e) {
+      // Get.offAll(() => MyHomePage());
+      print(e.toString());
+    }
   }
 
   @override
@@ -158,16 +140,13 @@ class _HomePageState extends State<HomePage> {
   }
 }
 
-const _chainId = "11155111";
+// Your PrefsDb class implementation
 
-final _sepoliaChain = W3MChainInfo(
-  chainName: 'Ethereum Mainnet',
-  namespace: 'eip155:1',
-  chainId: 'eip155:1',
-  tokenName: 'ETH',
-  rpcUrl: 'https://rpc.sepolia.org/',
-  blockExplorer: W3MBlockExplorer(
-    name: 'Sepolia Explorer',
-    url: 'https://sepolia.etherscan.io/',
-  ),
-);
+void main() {
+  runApp(MaterialApp(
+    home: Scaffold(
+      appBar: AppBar(title: Text('Web3Modal Example')),
+      body: HomePage(),
+    ),
+  ));
+}
